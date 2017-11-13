@@ -2,6 +2,8 @@
 
 module SEPA
   class CreditTransfer < Message
+    include ::SEPA::Shared::PostalAddressBuilder
+
     self.account_class = DebtorAccount
     self.transaction_class = CreditTransferTransaction
     self.xml_main_tag = 'CstmrCdtTrfInitn'
@@ -70,13 +72,13 @@ module SEPA
           builder.ChrgBr('SLEV') unless schema_name == SEPA::PAIN_001_001_03_CH_02
 
           transactions.each do |transaction|
-            build_transaction(builder, transaction)
+            build_transaction(builder, transaction, schema_name)
           end
         end
       end
     end
 
-    def build_transaction(builder, transaction)
+    def build_transaction(builder, transaction, schema_name)
       builder.CdtTrfTxInf do
         builder.PmtId do
           if transaction.instruction.present?
@@ -84,27 +86,76 @@ module SEPA
           end
           builder.EndToEndId(transaction.reference)
         end
+        if transaction.ch_local_instrument.present?
+          builder.PmtTpInf do
+            builder.LclInstrm do
+              builder.Prtry(transaction.ch_local_instrument)
+            end
+          end
+        end
         builder.Amt do
           builder.InstdAmt('%.2f' % transaction.amount, Ccy: transaction.currency)
         end
-        if transaction.bic
+        if (transaction.bic.present? || transaction.iban.start_with?('CH') || transaction.iban.start_with?('LI')) || transaction.creditor_bank_name.present? || transaction.creditor_bank_postal_address.present?
           builder.CdtrAgt do
             builder.FinInstnId do
-              builder.BIC(transaction.bic)
+              if transaction.bic.present?
+                builder.BIC(transaction.bic)
+              else
+                if transaction.ch_iid.present? || transaction.iban.present?
+                  # IBAN in CH/LI includes proprietary IID member ID
+                  builder.ClrSysMmbId do
+                    builder.ClrSysId do
+                      builder.Cd('CHBCC')
+                    end
+                    builder.MmbId(transaction.ch_iid || transaction.iban[4..8])
+                  end
+                end
+              end
+              if transaction.ch_bank_postal_account.present?
+                builder.Othr do
+                  builder.Id(transaction.ch_bank_postal_account)
+                end
+              end
+              builder.Nm(transaction.creditor_bank_name) if transaction.creditor_bank_name.present?
+              builder.PstlAdr do
+                build_postal_address(builder, transaction.creditor_bank_postal_address)
+              end if transaction.creditor_bank_postal_address.present?
             end
           end
         end
         builder.Cdtr do
           builder.Nm(transaction.name)
+          builder.PstlAdr do
+            build_postal_address(builder, transaction.postal_address)
+          end if transaction.postal_address.present?
         end
         builder.CdtrAcct do
-          builder.Id do
-            builder.IBAN(transaction.iban)
+          if transaction.iban.present?
+            builder.Id do
+              builder.IBAN(transaction.iban)
+            end
+          elsif transaction.ch_postal_account.present? || transaction.ch_isr_participation_number.present? || transaction.ch_bank_account.present? || transaction.ch_code_line.present?
+            builder.Id do
+              builder.Othr do
+                builder.Id(transaction.ch_postal_account || transaction.ch_isr_participation_number || transaction.ch_bank_account || transaction.ch_code_line)
+              end
+            end
+          else
+            raise 'no account info present'
           end
         end
-        if transaction.remittance_information
+        if transaction.remittance_information.present?
           builder.RmtInf do
             builder.Ustrd(transaction.remittance_information)
+          end
+        elsif schema_name == SEPA::PAIN_001_001_03_CH_02 && transaction.remittance_reference.present?
+          builder.RmtInf do
+            builder.Strd do
+              builder.CdtrRefInf do
+                builder.Ref(transaction.remittance_reference)
+              end
+            end
           end
         end
       end
